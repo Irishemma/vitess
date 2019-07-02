@@ -73,9 +73,6 @@ For example:
   go run test.go test1 test2 -- --topo-server-flavor=etcd2
 `
 
-// List of flavors for which a bootstrap Docker image is available.
-const flavors = "mariadb,mysql56,mysql57,percona,percona57"
-
 // Flags
 var (
 	flavor         = flag.String("flavor", "mysql57", "comma-separated bootstrap flavor(s) to run against (when using Docker mode). Available flavors: all,"+flavors)
@@ -107,6 +104,9 @@ var (
 const (
 	statsFileName  = "test/stats.json"
 	configFileName = "test/config.json"
+
+	// List of flavors for which a bootstrap Docker image is available.
+	flavors = "mariadb,mysql56,mysql57,percona,percona57"
 )
 
 // Config is the overall object serialized in test/config.json.
@@ -414,7 +414,7 @@ func main() {
 	flaky := 0
 
 	// Listen for signals.
-	sigchan := make(chan os.Signal)
+	sigchan := make(chan os.Signal, 1)
 	signal.Notify(sigchan, syscall.SIGINT)
 
 	// Run tests.
@@ -563,7 +563,7 @@ func main() {
 	}
 
 	// Print summary.
-	log.Printf(strings.Repeat("=", 60))
+	log.Print(strings.Repeat("=", 60))
 	for _, t := range tests {
 		tname := t.flavor + "." + t.name
 		switch {
@@ -577,7 +577,7 @@ func main() {
 			log.Printf("%-40s\tSKIPPED", tname)
 		}
 	}
-	log.Printf(strings.Repeat("=", 60))
+	log.Print(strings.Repeat("=", 60))
 	skipped := len(tests) - passed - flaky - failed
 	log.Printf("%v PASSED, %v FLAKY, %v FAILED, %v SKIPPED", passed, flaky, failed, skipped)
 	log.Printf("Total time: %v", round(time.Since(startTime)))

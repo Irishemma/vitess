@@ -87,6 +87,8 @@ func newJoin(lpb, rpb *primitiveBuilder, ajoin *sqlparser.JoinTableExpr) error {
 			// we mark the LHS symtab as outer scope to the RHS, just like
 			// a subquery. This make the RHS treat the LHS symbols as external.
 			// This will prevent constructs from escaping out of the rpb scope.
+			// At this point, the LHS symtab also contains symbols of the RHS.
+			// But the RHS will hide those, as intended.
 			rpb.st.Outer = lpb.st
 			if err := rpb.pushFilter(ajoin.Condition.On, sqlparser.WhereStr); err != nil {
 				return err
@@ -95,20 +97,11 @@ func newJoin(lpb, rpb *primitiveBuilder, ajoin *sqlparser.JoinTableExpr) error {
 			return errors.New("unsupported: join with USING(column_list) clause")
 		}
 	}
-	// Merge the symbol tables. In the case of a left join, we have to
-	// ideally create new symbols that originate from the join primitive.
-	// However, this is not worth it for now, because the Push functions
-	// verify that only valid constructs are passed through in case of left join.
-	if err := lpb.st.Merge(rpb.st); err != nil {
-		return err
-	}
 	lpb.bldr = &join{
 		Left:  lpb.bldr,
 		Right: rpb.bldr,
 		ejoin: &engine.Join{
 			Opcode: opcode,
-			Left:   lpb.bldr.Primitive(),
-			Right:  rpb.bldr.Primitive(),
 			Vars:   make(map[string]int),
 		},
 	}
@@ -134,6 +127,8 @@ func (jb *join) Reorder(order int) {
 
 // Primitive satisfies the builder interface.
 func (jb *join) Primitive() engine.Primitive {
+	jb.ejoin.Left = jb.Left.Primitive()
+	jb.ejoin.Right = jb.Right.Primitive()
 	return jb.ejoin
 }
 
@@ -159,9 +154,9 @@ func (jb *join) PushFilter(pb *primitiveBuilder, filter sqlparser.Expr, whereTyp
 }
 
 // PushSelect satisfies the builder interface.
-func (jb *join) PushSelect(expr *sqlparser.AliasedExpr, origin builder) (rc *resultColumn, colnum int, err error) {
+func (jb *join) PushSelect(pb *primitiveBuilder, expr *sqlparser.AliasedExpr, origin builder) (rc *resultColumn, colnum int, err error) {
 	if jb.isOnLeft(origin.Order()) {
-		rc, colnum, err = jb.Left.PushSelect(expr, origin)
+		rc, colnum, err = jb.Left.PushSelect(pb, expr, origin)
 		if err != nil {
 			return nil, 0, err
 		}
@@ -172,7 +167,7 @@ func (jb *join) PushSelect(expr *sqlparser.AliasedExpr, origin builder) (rc *res
 			return nil, 0, errors.New("unsupported: cross-shard left join and column expressions")
 		}
 
-		rc, colnum, err = jb.Right.PushSelect(expr, origin)
+		rc, colnum, err = jb.Right.PushSelect(pb, expr, origin)
 		if err != nil {
 			return nil, 0, err
 		}
@@ -182,16 +177,93 @@ func (jb *join) PushSelect(expr *sqlparser.AliasedExpr, origin builder) (rc *res
 	return rc, len(jb.resultColumns) - 1, nil
 }
 
-// PushOrderByNull satisfies the builder interface.
-func (jb *join) PushOrderByNull() {
-	jb.Left.PushOrderByNull()
-	jb.Right.PushOrderByNull()
+// MakeDistinct satisfies the builder interface.
+func (jb *join) MakeDistinct() error {
+	return errors.New("unsupported: distinct on cross-shard join")
 }
 
-// PushOrderByRand satisfies the builder interface.
-func (jb *join) PushOrderByRand() {
-	jb.Left.PushOrderByRand()
-	jb.Right.PushOrderByRand()
+// PushGroupBy satisfies the builder interface.
+func (jb *join) PushGroupBy(groupBy sqlparser.GroupBy) error {
+	if (groupBy) == nil {
+		return nil
+	}
+	return errors.New("unupported: group by on cross-shard join")
+}
+
+// PushOrderBy satisfies the builder interface.
+func (jb *join) PushOrderBy(orderBy sqlparser.OrderBy) (builder, error) {
+	isSpecial := false
+	switch len(orderBy) {
+	case 0:
+		isSpecial = true
+	case 1:
+		if _, ok := orderBy[0].Expr.(*sqlparser.NullVal); ok {
+			isSpecial = true
+		} else if f, ok := orderBy[0].Expr.(*sqlparser.FuncExpr); ok {
+			if f.Name.Lowered() == "rand" {
+				isSpecial = true
+			}
+		}
+	}
+	if isSpecial {
+		l, err := jb.Left.PushOrderBy(orderBy)
+		if err != nil {
+			return nil, err
+		}
+		jb.Left = l
+		r, err := jb.Right.PushOrderBy(orderBy)
+		if err != nil {
+			return nil, err
+		}
+		jb.Right = r
+		return jb, nil
+	}
+
+	for _, order := range orderBy {
+		if node, ok := order.Expr.(*sqlparser.SQLVal); ok {
+			// This block handles constructs that use ordinals for 'ORDER BY'. For example:
+			// SELECT a, b, c FROM t1, t2 ORDER BY 1, 2, 3.
+			num, err := ResultFromNumber(jb.ResultColumns(), node)
+			if err != nil {
+				return nil, err
+			}
+			if jb.ResultColumns()[num].column.Origin().Order() > jb.Left.Order() {
+				return nil, errors.New("unsupported: order by spans across shards")
+			}
+		} else {
+			// Analyze column references within the expression to make sure they all
+			// go to the left.
+			err := sqlparser.Walk(func(node sqlparser.SQLNode) (kontinue bool, err error) {
+				switch node := node.(type) {
+				case *sqlparser.ColName:
+					if node.Metadata.(*column).Origin().Order() > jb.Left.Order() {
+						return false, errors.New("unsupported: order by spans across shards")
+					}
+				case *sqlparser.Subquery:
+					// Unreachable because ResolveSymbols perfoms this check up above.
+					return false, errors.New("unsupported: order by has subquery")
+				}
+				return true, nil
+			}, order.Expr)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	// There were no errors. We can push the order by to the left-most route.
+	l, err := jb.Left.PushOrderBy(orderBy)
+	if err != nil {
+		return nil, err
+	}
+	jb.Left = l
+	// Still need to push an empty order by to the right.
+	r, err := jb.Right.PushOrderBy(nil)
+	if err != nil {
+		return nil, err
+	}
+	jb.Right = r
+	return jb, nil
 }
 
 // SetUpperLimit satisfies the builder interface.

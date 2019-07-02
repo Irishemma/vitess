@@ -80,7 +80,7 @@ func NewReader(checker connpool.MySQLChecker, config tabletenv.TabletConfig) *Re
 		interval: config.HeartbeatInterval,
 		ticks:    timer.NewTimer(config.HeartbeatInterval),
 		errorLog: logutil.NewThrottledLogger("HeartbeatReporter", 60*time.Second),
-		pool:     connpool.New(config.PoolNamePrefix+"HeartbeatReadPool", 1, time.Duration(config.IdleTimeout*1e9), checker),
+		pool:     connpool.New(config.PoolNamePrefix+"HeartbeatReadPool", 1, 0, time.Duration(config.IdleTimeout*1e9), checker),
 	}
 }
 
@@ -207,7 +207,7 @@ func (r *Reader) bindHeartbeatFetch() (string, error) {
 // parseHeartbeatResult turns a raw result into the timestamp for processing.
 func parseHeartbeatResult(res *sqltypes.Result) (int64, error) {
 	if len(res.Rows) != 1 {
-		return 0, fmt.Errorf("Failed to read heartbeat: writer query did not result in 1 row. Got %v", len(res.Rows))
+		return 0, fmt.Errorf("failed to read heartbeat: writer query did not result in 1 row. Got %v", len(res.Rows))
 	}
 	ts, err := sqltypes.ToInt64(res.Rows[0][0])
 	if err != nil {
@@ -225,4 +225,9 @@ func (r *Reader) recordError(err error) {
 	r.lagMu.Unlock()
 	r.errorLog.Errorf("%v", err)
 	readErrors.Add(1)
+}
+
+// IsOpen returns true if Reader is open.
+func (r *Reader) IsOpen() bool {
+	return r.isOpen
 }

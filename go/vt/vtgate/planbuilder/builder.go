@@ -31,7 +31,7 @@ import (
 // builder defines the interface that a primitive must
 // satisfy.
 type builder interface {
-	// Order is the execution order of the primitve. If there are subprimitves,
+	// Order is the execution order of the primitive. If there are subprimitives,
 	// the order is one above the order of the subprimitives.
 	// This is because the primitive executes its subprimitives first and
 	// processes their results to generate its own values.
@@ -48,9 +48,6 @@ type builder interface {
 	// execute before this one.
 	Reorder(int)
 
-	// Primitve returns the underlying primitive.
-	Primitive() engine.Primitive
-
 	// First returns the first builder of the tree,
 	// which is usually the left most.
 	First() builder
@@ -64,16 +61,17 @@ type builder interface {
 	// a resultColumn entry and return it. The top level caller
 	// must accumulate these result columns and set the symtab
 	// after analysis.
-	PushSelect(expr *sqlparser.AliasedExpr, origin builder) (rc *resultColumn, colnum int, err error)
+	PushSelect(pb *primitiveBuilder, expr *sqlparser.AliasedExpr, origin builder) (rc *resultColumn, colnum int, err error)
 
-	// PushOrderByNull pushes the special case ORDER By NULL to
-	// all primitives. It's safe to push down this clause because it's
-	// just on optimization hint.
-	PushOrderByNull()
+	// MakeDistinct makes the primitive handle the distinct clause.
+	MakeDistinct() error
+	// PushGroupBy makes the primitive handle the GROUP BY clause.
+	PushGroupBy(sqlparser.GroupBy) error
 
-	// PushOrderByRand pushes the special case ORDER BY RAND() to
-	// all primitives.
-	PushOrderByRand()
+	// PushOrderBy pushes the ORDER BY clause. It returns the
+	// the current primitive or a replacement if a new one was
+	// created.
+	PushOrderBy(sqlparser.OrderBy) (builder, error)
 
 	// SetUpperLimit is an optimization hint that tells that primitive
 	// that it does not need to return more than the specified number of rows.
@@ -103,13 +101,17 @@ type builder interface {
 	// resultColumn, whereas PushSelect guarantees the addition of a new
 	// result column and returns a distinct symbol for it.
 	SupplyCol(col *sqlparser.ColName) (rc *resultColumn, colnum int)
+
+	// Primitive returns the underlying primitive.
+	// This function should only be called after Wireup is finished.
+	Primitive() engine.Primitive
 }
 
 // ContextVSchema defines the interface for this package to fetch
 // info about tables.
 type ContextVSchema interface {
 	FindTable(tablename sqlparser.TableName) (*vindexes.Table, string, topodatapb.TabletType, key.Destination, error)
-	FindTableOrVindex(tablename sqlparser.TableName) (*vindexes.Table, vindexes.Vindex, string, topodatapb.TabletType, key.Destination, error)
+	FindTablesOrVindex(tablename sqlparser.TableName) ([]*vindexes.Table, vindexes.Vindex, string, topodatapb.TabletType, key.Destination, error)
 	DefaultKeyspace() (*vindexes.Keyspace, error)
 	TargetString() string
 }

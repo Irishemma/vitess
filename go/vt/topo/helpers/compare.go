@@ -21,6 +21,7 @@ package helpers
 import (
 	"reflect"
 
+	"github.com/golang/protobuf/proto"
 	"golang.org/x/net/context"
 	"vitess.io/vitess/go/vt/proto/vtrpc"
 	"vitess.io/vitess/go/vt/topo"
@@ -146,6 +147,10 @@ func CompareShardReplications(ctx context.Context, fromTS, toTS *topo.Server) er
 	if err != nil {
 		return vterrors.Wrapf(err, "fromTS.GetKeyspaces")
 	}
+	cells, err := fromTS.GetCellInfoNames(ctx)
+	if err != nil {
+		return vterrors.Wrap(err, "GetCellInfoNames()")
+	}
 
 	for _, keyspace := range keyspaces {
 		shards, err := fromTS.GetShardNames(ctx, keyspace)
@@ -154,14 +159,7 @@ func CompareShardReplications(ctx context.Context, fromTS, toTS *topo.Server) er
 		}
 
 		for _, shard := range shards {
-
-			// read the source shard to get the cells
-			si, err := fromTS.GetShard(ctx, keyspace, shard)
-			if err != nil {
-				return vterrors.Wrapf(err, "GetShard(%v, %v)", keyspace, shard)
-			}
-
-			for _, cell := range si.Shard.Cells {
+			for _, cell := range cells {
 				fromSRi, err := fromTS.GetShardReplication(ctx, cell, keyspace, shard)
 				if err != nil {
 					return vterrors.Wrapf(err, "GetShardReplication(%v, %v, %v)", cell, keyspace, shard)
@@ -179,6 +177,22 @@ func CompareShardReplications(ctx context.Context, fromTS, toTS *topo.Server) er
 				}
 			}
 		}
+	}
+	return nil
+}
+
+// CompareRoutingRules will compare the routing rules in the destination topo.
+func CompareRoutingRules(ctx context.Context, fromTS, toTS *topo.Server) error {
+	rrFrom, err := fromTS.GetRoutingRules(ctx)
+	if err != nil {
+		return vterrors.Wrapf(err, "GetKeyspace(from)")
+	}
+	rrTo, err := toTS.GetRoutingRules(ctx)
+	if err != nil {
+		return vterrors.Wrapf(err, "GetKeyspace(to)")
+	}
+	if !proto.Equal(rrFrom, rrTo) {
+		return vterrors.Errorf(vtrpc.Code_FAILED_PRECONDITION, "routing rules: %v does not match %v", rrFrom, rrTo)
 	}
 	return nil
 }

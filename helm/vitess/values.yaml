@@ -143,7 +143,7 @@ topology:
         # authType can be: none or secret. For secret, perform the following changes:
         # username: myuser
         # this is the secret that will be mounted as the user password
-        # kubectl create secret generic myuser_password --from-literal=password=abc123
+        # kubectl create secret generic myuser-password --from-literal=password=abc123
         # passwordSecret: myuser-password
 
       etcd:
@@ -173,6 +173,9 @@ etcd:
     requests:
       cpu: 200m
       memory: 100Mi
+  # If clusterWide is set to true, will add an annotation to EtcdCluster
+  # to make this cluster managed by clusterwide operators
+  # clusterWide: true
 
 # Default values for vtctld resources defined in 'topology'
 vtctld:

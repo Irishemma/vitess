@@ -73,7 +73,7 @@ type explainTablet struct {
 func newTablet(opts *Options, t *topodatapb.Tablet) *explainTablet {
 	db := fakesqldb.New(nil)
 
-	config := tabletenv.DefaultQsConfig
+	config := tabletenv.Config
 	if opts.ExecutionMode == ModeTwoPC {
 		config.TwoPCCoordinatorAddress = "XXX"
 		config.TwoPCAbandonAge = 1.0
@@ -88,7 +88,7 @@ func newTablet(opts *Options, t *topodatapb.Tablet) *explainTablet {
 
 	tablet.QueryService = queryservice.Wrap(
 		nil,
-		func(ctx context.Context, target *querypb.Target, conn queryservice.QueryService, name string, inTransaction bool, inner func(context.Context, *querypb.Target, queryservice.QueryService) (error, bool)) error {
+		func(ctx context.Context, target *querypb.Target, conn queryservice.QueryService, name string, inTransaction bool, inner func(context.Context, *querypb.Target, queryservice.QueryService) (bool, error)) error {
 			return fmt.Errorf("explainTablet does not implement %s", name)
 		},
 	)
@@ -117,6 +117,11 @@ var _ queryservice.QueryService = (*explainTablet)(nil) // compile-time interfac
 func (t *explainTablet) Begin(ctx context.Context, target *querypb.Target, options *querypb.ExecuteOptions) (int64, error) {
 	t.mu.Lock()
 	t.currentTime = batchTime.Wait()
+	t.tabletQueries = append(t.tabletQueries, &TabletQuery{
+		Time: t.currentTime,
+		SQL:  "begin",
+	})
+
 	t.mu.Unlock()
 
 	return t.tsv.Begin(ctx, target, options)
@@ -126,7 +131,12 @@ func (t *explainTablet) Begin(ctx context.Context, target *querypb.Target, optio
 func (t *explainTablet) Commit(ctx context.Context, target *querypb.Target, transactionID int64) error {
 	t.mu.Lock()
 	t.currentTime = batchTime.Wait()
+	t.tabletQueries = append(t.tabletQueries, &TabletQuery{
+		Time: t.currentTime,
+		SQL:  "commit",
+	})
 	t.mu.Unlock()
+
 	return t.tsv.Commit(ctx, target, transactionID)
 }
 
@@ -501,7 +511,6 @@ func (t *explainTablet) HandleQuery(c *mysql.Conn, query string, callback func(*
 		switch node := selStmt.From[0].(type) {
 		case *sqlparser.AliasedTableExpr:
 			table = sqlparser.GetTableName(node.Expr)
-			break
 		}
 
 		// For complex select queries just return an empty result
@@ -531,12 +540,10 @@ func (t *explainTablet) HandleQuery(c *mysql.Conn, query string, callback func(*
 					}
 					colNames = append(colNames, col)
 					colTypes = append(colTypes, colType)
-					break
 				case *sqlparser.FuncExpr:
 					// As a shortcut, functions are integral types
 					colNames = append(colNames, sqlparser.String(node))
 					colTypes = append(colTypes, querypb.Type_INT32)
-					break
 				case *sqlparser.SQLVal:
 					colNames = append(colNames, sqlparser.String(node))
 					switch node.Type {
@@ -555,11 +562,9 @@ func (t *explainTablet) HandleQuery(c *mysql.Conn, query string, callback func(*
 					default:
 						return fmt.Errorf("unsupported sql value %s", sqlparser.String(node))
 					}
-					break
 				default:
 					return fmt.Errorf("unsupported select expression %s", sqlparser.String(node))
 				}
-				break
 			case *sqlparser.StarExpr:
 				for col, colType := range colTypeMap {
 					colNames = append(colNames, col)
@@ -598,15 +603,12 @@ func (t *explainTablet) HandleQuery(c *mysql.Conn, query string, callback func(*
 		resultJSON, _ := json.MarshalIndent(result, "", "    ")
 		log.V(100).Infof("query %s result %s\n", query, string(resultJSON))
 
-		break
 	case sqlparser.StmtBegin, sqlparser.StmtCommit, sqlparser.StmtSet, sqlparser.StmtShow:
 		result = &sqltypes.Result{}
-		break
 	case sqlparser.StmtInsert, sqlparser.StmtReplace, sqlparser.StmtUpdate, sqlparser.StmtDelete:
 		result = &sqltypes.Result{
 			RowsAffected: 1,
 		}
-		break
 	default:
 		return fmt.Errorf("unsupported query %s", query)
 	}

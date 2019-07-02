@@ -45,7 +45,7 @@ func Init(opts *Options) error {
 	}
 	// Verify options
 	if opts.ACLFile == "" && opts.StaticAuthFile == "" {
-		return fmt.Errorf("No options specified")
+		return fmt.Errorf("no options specified")
 	}
 
 	options = opts
@@ -62,7 +62,7 @@ func Run() error {
 			func() {},
 		)
 		if err != nil {
-			return fmt.Errorf("Fail to initialize Table ACL: %v", err)
+			return fmt.Errorf("fail to initialize Table ACL: %v", err)
 		}
 
 		fmt.Printf("JSON ACL file %s looks good\n", options.ACLFile)

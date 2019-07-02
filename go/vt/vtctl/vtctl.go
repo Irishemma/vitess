@@ -155,11 +155,12 @@ type commandGroup struct {
 // all Run hooks in parallel.
 var commandsMutex sync.Mutex
 
+// TODO: Convert these commands to be automatically generated from flag parser.
 var commands = []commandGroup{
 	{
 		"Tablets", []command{
 			{"InitTablet", commandInitTablet,
-				"[-allow_update] [-allow_different_shard] [-allow_master_override] [-parent] [-db_name_override=<db name>] [-hostname=<hostname>] [-mysql_port=<port>] [-port=<port>] [-grpc_port=<port>] -keyspace=<keyspace> -shard=<shard> <tablet alias> <tablet type>",
+				"[-allow_update] [-allow_different_shard] [-allow_master_override] [-parent] [-db_name_override=<db name>] [-hostname=<hostname>] [-mysql_port=<port>] [-port=<port>] [-grpc_port=<port>] [-tags=tag1:value1,tag2:value2] -keyspace=<keyspace> -shard=<shard> <tablet alias> <tablet type>",
 				"Initializes a tablet in the topology.\n"},
 			{"GetTablet", commandGetTablet,
 				"<tablet alias>",
@@ -240,15 +241,18 @@ var commands = []commandGroup{
 			{"ListShardTablets", commandListShardTablets,
 				"<keyspace/shard>",
 				"Lists all tablets in the specified shard."},
-			{"SetShardServedTypes", commandSetShardServedTypes,
-				"[--cells=c1,c2,...] [--remove] <keyspace/shard> <served tablet type>",
-				"Add or remove served type to/from a shard. This is meant as an emergency function. It does not rebuild any serving graph i.e. does not run 'RebuildKeyspaceGraph'."},
+			{"SetShardIsMasterServing", commandSetShardIsMasterServing,
+				"<keyspace/shard> <is_master_serving>",
+				"Add or remove a shard from serving. This is meant as an emergency function. It does not rebuild any serving graph i.e. does not run 'RebuildKeyspaceGraph'."},
 			{"SetShardTabletControl", commandSetShardTabletControl,
 				"[--cells=c1,c2,...] [--blacklisted_tables=t1,t2,...] [--remove] [--disable_query_service] <keyspace/shard> <tablet type>",
 				"Sets the TabletControl record for a shard and type. Only use this for an emergency fix or after a finished vertical split. The *MigrateServedFrom* and *MigrateServedType* commands set this field appropriately already. Always specify the blacklisted_tables flag for vertical splits, but never for horizontal splits.\n" +
 					"To set the DisableQueryServiceFlag, keep 'blacklisted_tables' empty, and set 'disable_query_service' to true or false. Useful to fix horizontal splits gone wrong.\n" +
 					"To change the blacklisted tables list, specify the 'blacklisted_tables' parameter with the new list. Useful to fix tables that are being blocked after a vertical split.\n" +
 					"To just remove the ShardTabletControl entirely, use the 'remove' flag, useful after a vertical split is finished to remove serving restrictions."},
+			{"UpdateSrvKeyspacePartition", commandUpdateSrvKeyspacePartition,
+				"[--cells=c1,c2,...] [--remove] <keyspace/shard> <tablet type>",
+				"Updates KeyspaceGraph partition for a shard and type. Only use this for an emergency fix during an horizontal shard split. The *MigrateServedType* commands set this field appropriately already. Specify the remove flag, if you want the shard to be removed from the desired partition."},
 			{"SourceShardDelete", commandSourceShardDelete,
 				"<keyspace/shard> <uid>",
 				"Deletes the SourceShard record with the provided index. This is meant as an emergency cleanup function. It does not call RefreshState for the shard master."},
@@ -278,7 +282,7 @@ var commands = []commandGroup{
 	{
 		"Keyspaces", []command{
 			{"CreateKeyspace", commandCreateKeyspace,
-				"[-sharding_column_name=name] [-sharding_column_type=type] [-served_from=tablettype1:ks1,tablettype2,ks2,...] [-force] <keyspace name>",
+				"[-sharding_column_name=name] [-sharding_column_type=type] [-served_from=tablettype1:ks1,tablettype2:ks2,...] [-force] <keyspace name>",
 				"Creates the specified keyspace."},
 			{"DeleteKeyspace", commandDeleteKeyspace,
 				"[-recursive] <keyspace>",
@@ -304,6 +308,12 @@ var commands = []commandGroup{
 			{"ValidateKeyspace", commandValidateKeyspace,
 				"[-ping-tablets] <keyspace name>",
 				"Validates that all nodes reachable from the specified keyspace are consistent."},
+			{"SplitClone", commandSplitClone,
+				"<keyspace> <from_shards> <to_shards>",
+				"Start the SplitClone process to perform horizontal resharding. Example: SplitClone ks '0' '-80,80-'"},
+			{"VerticalSplitClone", commandVerticalSplitClone,
+				"<from_keyspace> <to_keyspace> <tables>",
+				"Start the VerticalSplitClone process to perform vertical resharding. Example: SplitClone from_ks to_ks 'a,/b.*/'"},
 			{"MigrateServedTypes", commandMigrateServedTypes,
 				"[-cells=c1,c2,...] [-reverse] [-skip-refresh-state] <keyspace/shard> <served tablet type>",
 				"Migrates a serving type from the source shard to the shards that it replicates to. This command also rebuilds the serving graph. The <keyspace/shard> argument can specify any of the shards involved in the migration."},
@@ -392,6 +402,12 @@ var commands = []commandGroup{
 			{"ApplyVSchema", commandApplyVSchema,
 				"{-vschema=<vschema> || -vschema_file=<vschema file> || -sql=<sql> || -sql_file=<sql file>} [-cells=c1,c2,...] [-skip_rebuild] [-dry-run] <keyspace>",
 				"Applies the VTGate routing schema to the provided keyspace. Shows the result after application."},
+			{"GetRoutingRules", commandGetRoutingRules,
+				"",
+				"Displays the VSchema routing rules."},
+			{"ApplyRoutingRules", commandApplyRoutingRules,
+				"{-rules=<rules> || -rules_file=<rules_file=<sql file>} [-cells=c1,c2,...] [-skip_rebuild] [-dry-run]",
+				"Applies the VSchema routing rules."},
 			{"RebuildVSchemaGraph", commandRebuildVSchemaGraph,
 				"[-cells=c1,c2,...]",
 				"Rebuilds the cell-specific SrvVSchema from the global VSchema objects in the provided cells (or all cells if none provided)."},
@@ -440,7 +456,7 @@ func addCommand(groupName string, c command) {
 			return
 		}
 	}
-	panic(fmt.Errorf("Trying to add to missing group %v", groupName))
+	panic(fmt.Errorf("trying to add to missing group %v", groupName))
 }
 
 func addCommandGroup(groupName string) {
@@ -524,7 +540,7 @@ func getFileParam(flag, flagFile, name string) (string, error) {
 	}
 	data, err := ioutil.ReadFile(flagFile)
 	if err != nil {
-		return "", fmt.Errorf("Cannot read file %v: %v", flagFile, err)
+		return "", fmt.Errorf("cannot read file %v: %v", flagFile, err)
 	}
 	return string(data), nil
 }
@@ -539,15 +555,13 @@ func keyspaceParamsToKeyspaces(ctx context.Context, wr *wrangler.Wrangler, param
 	for _, param := range params {
 		if param[0] == '/' {
 			// this is a topology-specific path
-			for _, path := range params {
-				result = append(result, path)
-			}
+			result = append(result, params...)
 		} else {
 			// this is not a path, so assume a keyspace name,
 			// possibly with wildcards
 			keyspaces, err := wr.TopoServer().ResolveKeyspaceWildcard(ctx, param)
 			if err != nil {
-				return nil, fmt.Errorf("Failed to resolve keyspace wildcard %v: %v", param, err)
+				return nil, fmt.Errorf("failed to resolve keyspace wildcard %v: %v", param, err)
 			}
 			result = append(result, keyspaces...)
 		}
@@ -577,7 +591,7 @@ func shardParamsToKeyspaceShards(ctx context.Context, wr *wrangler.Wrangler, par
 			// name / shard name, each possibly with wildcards
 			keyspaceShards, err := wr.TopoServer().ResolveShardWildcard(ctx, param)
 			if err != nil {
-				return nil, fmt.Errorf("Failed to resolve keyspace/shard wildcard %v: %v", param, err)
+				return nil, fmt.Errorf("failed to resolve keyspace/shard wildcard %v: %v", param, err)
 			}
 			result = append(result, keyspaceShards...)
 		}
@@ -607,7 +621,7 @@ func parseTabletType(param string, types []topodatapb.TabletType) (topodatapb.Ta
 		return topodatapb.TabletType_UNKNOWN, fmt.Errorf("invalid tablet type %v: %v", param, err)
 	}
 	if !topoproto.IsTypeInList(topodatapb.TabletType(tabletType), types) {
-		return topodatapb.TabletType_UNKNOWN, fmt.Errorf("Type %v is not one of: %v", tabletType, strings.Join(topoproto.MakeStringTypeList(types), " "))
+		return topodatapb.TabletType_UNKNOWN, fmt.Errorf("type %v is not one of: %v", tabletType, strings.Join(topoproto.MakeStringTypeList(types), " "))
 	}
 	return tabletType, nil
 }
@@ -1264,30 +1278,55 @@ func commandListShardTablets(ctx context.Context, wr *wrangler.Wrangler, subFlag
 	return listTabletsByShard(ctx, wr, keyspace, shard)
 }
 
-func commandSetShardServedTypes(ctx context.Context, wr *wrangler.Wrangler, subFlags *flag.FlagSet, args []string) error {
-	cellsStr := subFlags.String("cells", "", "Specifies a comma-separated list of cells to update")
-	remove := subFlags.Bool("remove", false, "Removes the served tablet type")
+func commandSetShardIsMasterServing(ctx context.Context, wr *wrangler.Wrangler, subFlags *flag.FlagSet, args []string) error {
 	if err := subFlags.Parse(args); err != nil {
 		return err
 	}
 	if subFlags.NArg() != 2 {
-		return fmt.Errorf("the <keyspace/shard> and <served tablet type> arguments are both required for the SetShardServedTypes command")
+		return fmt.Errorf("the <keyspace/shard> <is_master_serving> arguments are both required for the SetShardIsMasterServing command")
 	}
 	keyspace, shard, err := topoproto.ParseKeyspaceShard(subFlags.Arg(0))
 	if err != nil {
 		return err
 	}
 
-	servedType, err := parseServingTabletType3(subFlags.Arg(1))
+	isMasterServing, err := strconv.ParseBool(subFlags.Arg(1))
 	if err != nil {
 		return err
 	}
+
+	return wr.SetShardIsMasterServing(ctx, keyspace, shard, isMasterServing)
+}
+
+func commandUpdateSrvKeyspacePartition(ctx context.Context, wr *wrangler.Wrangler, subFlags *flag.FlagSet, args []string) error {
+	cellsStr := subFlags.String("cells", "", "Specifies a comma-separated list of cells to update")
+	remove := subFlags.Bool("remove", false, "Removes shard from serving keyspace partition")
+
+	if err := subFlags.Parse(args); err != nil {
+		return err
+	}
+	if subFlags.NArg() != 2 {
+		return fmt.Errorf("the <keyspace/shard> and <tablet type> arguments are both required for the UpdateSrvKeyspacePartition command")
+	}
+	keyspace, shard, err := topoproto.ParseKeyspaceShard(subFlags.Arg(0))
+	if err != nil {
+		return err
+	}
+	tabletType, err := parseServingTabletType3(subFlags.Arg(1))
+	if err != nil {
+		return err
+	}
+
 	var cells []string
 	if *cellsStr != "" {
 		cells = strings.Split(*cellsStr, ",")
 	}
 
-	return wr.SetShardServedTypes(ctx, keyspace, shard, cells, servedType, *remove)
+	err = wr.UpdateSrvKeyspacePartitions(ctx, keyspace, shard, tabletType, cells, *remove)
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 func commandSetShardTabletControl(ctx context.Context, wr *wrangler.Wrangler, subFlags *flag.FlagSet, args []string) error {
@@ -1318,7 +1357,14 @@ func commandSetShardTabletControl(ctx context.Context, wr *wrangler.Wrangler, su
 		cells = strings.Split(*cellsStr, ",")
 	}
 
-	return wr.SetShardTabletControl(ctx, keyspace, shard, tabletType, cells, *remove, *disableQueryService, blacklistedTables)
+	err = wr.SetShardTabletControl(ctx, keyspace, shard, tabletType, cells, *remove, blacklistedTables)
+	if err != nil {
+		return err
+	}
+	if !*remove && len(blacklistedTables) == 0 {
+		return wr.UpdateDisableQueryService(ctx, keyspace, shard, tabletType, cells, *disableQueryService)
+	}
+	return nil
 }
 
 func commandSourceShardDelete(ctx context.Context, wr *wrangler.Wrangler, subFlags *flag.FlagSet, args []string) error {
@@ -1496,6 +1542,8 @@ func commandCreateKeyspace(ctx context.Context, wr *wrangler.Wrangler, subFlags 
 	shardingColumnName := subFlags.String("sharding_column_name", "", "Specifies the column to use for sharding operations")
 	shardingColumnType := subFlags.String("sharding_column_type", "", "Specifies the type of the column to use for sharding operations")
 	force := subFlags.Bool("force", false, "Proceeds even if the keyspace already exists")
+	allowEmptyVSchema := subFlags.Bool("allow_empty_vschema", false, "If set this will allow a new keyspace to have no vschema")
+
 	var servedFrom flagutil.StringMapValue
 	subFlags.Var(&servedFrom, "served_from", "Specifies a comma-separated list of dbtype:keyspace pairs used to serve traffic")
 	if err := subFlags.Parse(args); err != nil {
@@ -1531,6 +1579,26 @@ func commandCreateKeyspace(ctx context.Context, wr *wrangler.Wrangler, subFlags 
 		wr.Logger().Infof("keyspace %v already exists (ignoring error with -force)", keyspace)
 		err = nil
 	}
+
+	vschema, err := wr.TopoServer().GetVSchema(ctx, keyspace)
+	if !*allowEmptyVSchema && (vschema == nil || topo.IsErrType(err, topo.NoNode)) {
+		err = wr.TopoServer().SaveVSchema(ctx, keyspace, &vschemapb.Keyspace{
+			Sharded:  false,
+			Vindexes: make(map[string]*vschemapb.Vindex),
+			Tables:   make(map[string]*vschemapb.Table),
+		})
+		if err != nil {
+			wr.Logger().Errorf("could not create blank vschema: %v", err)
+			return err
+		}
+	}
+
+	err = wr.TopoServer().RebuildSrvVSchema(ctx, []string{} /* cells */)
+	if err != nil {
+		wr.Logger().Errorf("could not rebuild SrvVschema after creating keyspace: %v", err)
+		return err
+	}
+
 	return err
 }
 
@@ -1677,6 +1745,32 @@ func commandValidateKeyspace(ctx context.Context, wr *wrangler.Wrangler, subFlag
 
 	keyspace := subFlags.Arg(0)
 	return wr.ValidateKeyspace(ctx, keyspace, *pingTablets)
+}
+
+func commandSplitClone(ctx context.Context, wr *wrangler.Wrangler, subFlags *flag.FlagSet, args []string) error {
+	if err := subFlags.Parse(args); err != nil {
+		return err
+	}
+	if subFlags.NArg() != 3 {
+		return fmt.Errorf("three arguments are required: keyspace, from_shards, to_shards")
+	}
+	keyspace := subFlags.Arg(0)
+	from := strings.Split(subFlags.Arg(1), ",")
+	to := strings.Split(subFlags.Arg(2), ",")
+	return wr.SplitClone(ctx, keyspace, from, to)
+}
+
+func commandVerticalSplitClone(ctx context.Context, wr *wrangler.Wrangler, subFlags *flag.FlagSet, args []string) error {
+	if err := subFlags.Parse(args); err != nil {
+		return err
+	}
+	if subFlags.NArg() != 3 {
+		return fmt.Errorf("three arguments are required: from_keyspace, to_keyspace, tables")
+	}
+	fromKeyspace := subFlags.Arg(0)
+	toKeyspace := subFlags.Arg(1)
+	tables := strings.Split(subFlags.Arg(2), ",")
+	return wr.VerticalSplitClone(ctx, fromKeyspace, toKeyspace, tables)
 }
 
 func commandMigrateServedTypes(ctx context.Context, wr *wrangler.Wrangler, subFlags *flag.FlagSet, args []string) error {
@@ -2064,7 +2158,7 @@ func commandGetPermissions(ctx context.Context, wr *wrangler.Wrangler, subFlags 
 	}
 	p, err := wr.GetPermissions(ctx, tabletAlias)
 	if err == nil {
-		wr.Logger().Infof("%v", p.String()) // they can contain '%'
+		printJSON(wr.Logger(), p)
 	}
 	return err
 }
@@ -2117,6 +2211,20 @@ func commandGetVSchema(ctx context.Context, wr *wrangler.Wrangler, subFlags *fla
 	return nil
 }
 
+func commandGetRoutingRules(ctx context.Context, wr *wrangler.Wrangler, subFlags *flag.FlagSet, args []string) error {
+	rr, err := wr.TopoServer().GetRoutingRules(ctx)
+	if err != nil {
+		return err
+	}
+	b, err := json2.MarshalIndentPB(rr, "  ")
+	if err != nil {
+		wr.Logger().Printf("%v\n", err)
+		return err
+	}
+	wr.Logger().Printf("%s\n", b)
+	return nil
+}
+
 func commandRebuildVSchemaGraph(ctx context.Context, wr *wrangler.Wrangler, subFlags *flag.FlagSet, args []string) error {
 	var cells flagutil.StringListValue
 	subFlags.Var(&cells, "cells", "Specifies a comma-separated list of cells to look for tablets")
@@ -2128,7 +2236,7 @@ func commandRebuildVSchemaGraph(ctx context.Context, wr *wrangler.Wrangler, subF
 		return fmt.Errorf("RebuildVSchemaGraph doesn't take any arguments")
 	}
 
-	return topotools.RebuildVSchema(ctx, wr.Logger(), wr.TopoServer(), cells)
+	return wr.TopoServer().RebuildSrvVSchema(ctx, cells)
 }
 
 func commandApplyVSchema(ctx context.Context, wr *wrangler.Wrangler, subFlags *flag.FlagSet, args []string) error {
@@ -2235,7 +2343,55 @@ func commandApplyVSchema(ctx context.Context, wr *wrangler.Wrangler, subFlags *f
 		wr.Logger().Warningf("Skipping rebuild of SrvVSchema, will need to run RebuildVSchemaGraph for changes to take effect")
 		return nil
 	}
-	return topotools.RebuildVSchema(ctx, wr.Logger(), wr.TopoServer(), cells)
+	return wr.TopoServer().RebuildSrvVSchema(ctx, cells)
+}
+
+func commandApplyRoutingRules(ctx context.Context, wr *wrangler.Wrangler, subFlags *flag.FlagSet, args []string) error {
+	routingRules := subFlags.String("rules", "", "Specify rules as a string")
+	routingRulesFile := subFlags.String("vschema_file", "", "Specify rules in a file")
+	skipRebuild := subFlags.Bool("skip_rebuild", false, "If set, do no rebuild the SrvSchema objects.")
+	var cells flagutil.StringListValue
+	subFlags.Var(&cells, "cells", "If specified, limits the rebuild to the cells, after upload. Ignored if skipRebuild is set.")
+
+	if err := subFlags.Parse(args); err != nil {
+		return err
+	}
+	if subFlags.NArg() != 0 {
+		return fmt.Errorf("ApplyRoutingRules doesn't take any arguments")
+	}
+
+	var rulesBytes []byte
+	if *routingRulesFile != "" {
+		var err error
+		rulesBytes, err = ioutil.ReadFile(*routingRulesFile)
+		if err != nil {
+			return err
+		}
+	} else {
+		rulesBytes = []byte(*routingRules)
+	}
+
+	rr := &vschemapb.RoutingRules{}
+	if err := json2.Unmarshal(rulesBytes, rr); err != nil {
+		return err
+	}
+
+	b, err := json2.MarshalIndentPB(rr, "  ")
+	if err != nil {
+		wr.Logger().Errorf2(err, "Failed to marshal RoutingRules for display")
+	} else {
+		wr.Logger().Printf("New RoutingRules object:\n%s\nIf this is not what you expected, check the input data (as JSON parsing will skip unexpected fields).\n", b)
+	}
+
+	if err := wr.TopoServer().SaveRoutingRules(ctx, rr); err != nil {
+		return err
+	}
+
+	if *skipRebuild {
+		wr.Logger().Warningf("Skipping rebuild of SrvVSchema, will need to run RebuildVSchemaGraph for changes to take effect")
+		return nil
+	}
+	return wr.TopoServer().RebuildSrvVSchema(ctx, cells)
 }
 
 func commandGetSrvKeyspaceNames(ctx context.Context, wr *wrangler.Wrangler, subFlags *flag.FlagSet, args []string) error {

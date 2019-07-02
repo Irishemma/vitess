@@ -67,9 +67,6 @@ func main() {
 	if err != nil {
 		log.Exitf("failed to parse -tablet-path: %v", err)
 	}
-	if tabletAlias.Uid < 0 {
-		log.Exitf("invalid tablet id: %d", tabletAlias.Uid)
-	}
 
 	var mycnf *mysqlctl.Mycnf
 	var socketFile string
@@ -141,5 +138,6 @@ func main() {
 		// to update our state, so closing it in OnClose()
 		ts.Close()
 	})
+
 	servenv.RunDefault()
 }

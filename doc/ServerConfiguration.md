@@ -149,7 +149,7 @@ Vitess servers are written in Go. There are a few Vitess-specific knobs that app
 
 Go, being a young language, tends to add major improvements over each version.
 So, the latest Go version is almost always recommended.
-Note that the latest Go version may be higher than the minimum version we require for compiling the binaries (see ["Prerequisites" section in the Getting Started guide](/getting-started/#prerequisites)).
+Note that the latest Go version may be higher than the minimum version we require for compiling the binaries (see ["Prerequisites" section in the Getting Started guide](https://github.com/vitessio/website/blob/master/content/docs/tutorials/kubernetes.md#prerequisites)).
 
 ### GOMAXPROCS
 
@@ -258,7 +258,7 @@ VTTablet requires multiple user credentials to perform its tasks. Since it's req
 
 **connection** parameters
 
-* **db\_socket**: The unix socket to connect on. If this is specifed, host and port will not be used.
+* **db\_socket**: The unix socket to connect on. If this is specified, host and port will not be used.
 * **db\_host**: The host name for the tcp connection.
 * **db\_port**: The tcp port to be used with the db\_host.
 * **db\_charset**: Character set. Only utf8 or latin1 based character sets are supported.
@@ -621,7 +621,7 @@ pretty much
 [set up Orchestrator](https://github.com/github/orchestrator/wiki/Orchestrator-Manual)
 in the normal way, with just a few additions as described below.
 
-For the [Kubernetes example](/getting-started/), we provide a
+For the [Kubernetes example](https://github.com/vitessio/website/blob/master/content/docs/tutorials/kubernetes.md), we provide a
 [sample script](https://github.com/vitessio/vitess/blob/master/examples/kubernetes/orchestrator-up.sh)
 to launch Orchestrator for you with these settings applied.
 

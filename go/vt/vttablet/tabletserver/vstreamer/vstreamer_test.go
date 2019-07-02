@@ -175,7 +175,7 @@ func TestRegexp(t *testing.T) {
 	runCases(t, filter, testcases)
 }
 
-func TestREKeyrange(t *testing.T) {
+func TestREKeyRange(t *testing.T) {
 	if testing.Short() {
 		t.Skip()
 	}
@@ -188,6 +188,11 @@ func TestREKeyrange(t *testing.T) {
 	})
 	engine.se.Reload(context.Background())
 
+	if err := env.SetVSchema(shardedVSchema); err != nil {
+		t.Fatal(err)
+	}
+	defer env.SetVSchema("{}")
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -198,11 +203,6 @@ func TestREKeyrange(t *testing.T) {
 		}},
 	}
 	ch := startStream(ctx, t, filter)
-
-	if err := env.SetVSchema(shardedVSchema); err != nil {
-		t.Fatal(err)
-	}
-	defer env.SetVSchema("{}")
 
 	// 1, 2, 3 and 5 are in shard -80.
 	// 4 and 6 are in shard 80-.
@@ -309,56 +309,6 @@ func TestSelectFilter(t *testing.T) {
 	runCases(t, filter, testcases)
 }
 
-func TestSelectExpressions(t *testing.T) {
-	if testing.Short() {
-		t.Skip()
-	}
-
-	execStatements(t, []string{
-		"create table expr_test(id int, val bigint, primary key(id))",
-	})
-	defer execStatements(t, []string{
-		"drop table expr_test",
-	})
-	engine.se.Reload(context.Background())
-
-	filter := &binlogdatapb.Filter{
-		Rules: []*binlogdatapb.Rule{{
-			Match:  "expr_test",
-			Filter: "select id, val, month(val), day(val), hour(val) from expr_test",
-		}},
-	}
-
-	testcases := []testcase{{
-		input: []string{
-			"begin",
-			"insert into expr_test values (1, 1546392881)",
-			"commit",
-		},
-		// MySQL issues GTID->BEGIN.
-		// MariaDB issues BEGIN->GTID.
-		output: [][]string{{
-			`gtid|begin`,
-			`gtid|begin`,
-			`type:FIELD field_event:<table_name:"expr_test" ` +
-				`fields:<name:"id" type:INT32 > ` +
-				`fields:<name:"val" type:INT64 > ` +
-				`fields:<name:"month(val)" type:VARBINARY > ` +
-				`fields:<name:"day(val)" type:VARBINARY > ` +
-				`fields:<name:"hour(val)" type:VARBINARY > > `,
-			`type:ROW row_event:<table_name:"expr_test" row_changes:<after:<lengths:1 lengths:10 lengths:6 lengths:8 lengths:10 values:"` +
-				`1` +
-				`1546392881` +
-				`201901` +
-				`20190102` +
-				`2019010201` +
-				`" > > > `,
-			`commit`,
-		}},
-	}}
-	runCases(t, filter, testcases)
-}
-
 func TestDDLAddColumn(t *testing.T) {
 	if testing.Short() {
 		t.Skip()
@@ -407,7 +357,7 @@ func TestDDLAddColumn(t *testing.T) {
 	go func() {
 		defer close(ch)
 		if err := vstream(ctx, t, pos, filter, ch); err != nil {
-			t.Fatal(err)
+			t.Error(err)
 		}
 	}()
 	expectLog(ctx, t, "ddls", ch, [][]string{{

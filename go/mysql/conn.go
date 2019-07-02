@@ -18,6 +18,8 @@ package mysql
 
 import (
 	"bufio"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
@@ -525,11 +527,11 @@ func (c *Conn) writeEphemeralPacket() error {
 	switch c.currentEphemeralPolicy {
 	case ephemeralWrite:
 		if err := c.writePacket(*c.currentEphemeralBuffer); err != nil {
-			return vterrors.Wrapf(err, "Conn %v", c.ID())
+			return vterrors.Wrapf(err, "conn %v", c.ID())
 		}
 	case ephemeralUnused, ephemeralRead:
 		// Programming error.
-		panic(vterrors.Errorf(vtrpc.Code_INTERNAL, "Conn %v: trying to call writeEphemeralPacket while currentEphemeralPolicy is %v", c.ID(), c.currentEphemeralPolicy))
+		panic(vterrors.Errorf(vtrpc.Code_INTERNAL, "conn %v: trying to call writeEphemeralPacket while currentEphemeralPolicy is %v", c.ID(), c.currentEphemeralPolicy))
 	}
 
 	return nil
@@ -613,7 +615,7 @@ func (c *Conn) writeOKPacket(affectedRows, lastInsertID uint64, flags uint16, wa
 	pos = writeLenEncInt(data, pos, affectedRows)
 	pos = writeLenEncInt(data, pos, lastInsertID)
 	pos = writeUint16(data, pos, flags)
-	pos = writeUint16(data, pos, warnings)
+	_ = writeUint16(data, pos, warnings)
 
 	return c.writeEphemeralPacket()
 }
@@ -635,7 +637,7 @@ func (c *Conn) writeOKPacketWithEOFHeader(affectedRows, lastInsertID uint64, fla
 	pos = writeLenEncInt(data, pos, affectedRows)
 	pos = writeLenEncInt(data, pos, lastInsertID)
 	pos = writeUint16(data, pos, flags)
-	pos = writeUint16(data, pos, warnings)
+	_ = writeUint16(data, pos, warnings)
 
 	return c.writeEphemeralPacket()
 }
@@ -658,7 +660,7 @@ func (c *Conn) writeErrorPacket(errorCode uint16, sqlState string, format string
 		panic("sqlState has to be 5 characters long")
 	}
 	pos = writeEOFString(data, pos, sqlState)
-	pos = writeEOFString(data, pos, errorMessage)
+	_ = writeEOFString(data, pos, errorMessage)
 
 	return c.writeEphemeralPacket()
 }
@@ -681,7 +683,7 @@ func (c *Conn) writeEOFPacket(flags uint16, warnings uint16) error {
 	pos := 0
 	pos = writeByte(data, pos, EOFPacket)
 	pos = writeUint16(data, pos, warnings)
-	pos = writeUint16(data, pos, flags)
+	_ = writeUint16(data, pos, flags)
 
 	return c.writeEphemeralPacket()
 }
@@ -912,7 +914,7 @@ func isEOFPacket(data []byte) bool {
 // type code set, i.e. should not be used if ClientDeprecateEOF is set.
 func parseEOFPacket(data []byte) (warnings uint16, more bool, err error) {
 	// The warning count is in position 2 & 3
-	warnings, _, ok := readUint16(data, 1)
+	warnings, _, _ = readUint16(data, 1)
 
 	// The status flag is in position 4 & 5
 	statusFlags, _, ok := readUint16(data, 3)
@@ -945,7 +947,7 @@ func parseOKPacket(data []byte) (uint64, uint64, uint16, uint16, error) {
 	}
 
 	// Warnings.
-	warnings, pos, ok := readUint16(data, pos)
+	warnings, _, ok := readUint16(data, pos)
 	if !ok {
 		return 0, 0, 0, 0, vterrors.Errorf(vtrpc.Code_INTERNAL, "invalid OK packet warnings: %v", data)
 	}
@@ -983,4 +985,11 @@ func ParseErrorPacket(data []byte) error {
 	msg := string(data[pos:])
 
 	return NewSQLError(int(code), string(sqlState), "%v", msg)
+}
+
+func (conn *Conn) GetTLSClientCerts() []*x509.Certificate {
+	if tlsConn, ok := conn.conn.(*tls.Conn); ok {
+		return tlsConn.ConnectionState().PeerCertificates
+	}
+	return nil
 }

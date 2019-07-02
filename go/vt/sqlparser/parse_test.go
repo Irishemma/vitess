@@ -1107,7 +1107,7 @@ var (
 		output: "show create procedure",
 	}, {
 		input:  "show create table t",
-		output: "show create table",
+		output: "show create table t",
 	}, {
 		input:  "show create trigger t",
 		output: "show create trigger",
@@ -1120,6 +1120,9 @@ var (
 	}, {
 		input:  "show databases",
 		output: "show databases",
+	}, {
+		input:  "show schemas",
+		output: "show schemas",
 	}, {
 		input:  "show engine INNODB",
 		output: "show engine",
@@ -1841,6 +1844,15 @@ func TestSubStr(t *testing.T) {
 	}, {
 		input:  `select substring("foo", 1, 2) from t`,
 		output: `select substr('foo', 1, 2) from t`,
+	}, {
+		input:  `select substr(substr("foo" from 1 for 2), 1, 2) from t`,
+		output: `select substr(substr('foo', 1, 2), 1, 2) from t`,
+	}, {
+		input:  `select substr(substring("foo", 1, 2), 3, 4) from t`,
+		output: `select substr(substr('foo', 1, 2), 3, 4) from t`,
+	}, {
+		input:  `select substring(substr("foo", 1), 2) from t`,
+		output: `select substr(substr('foo', 1), 2) from t`,
 	}}
 
 	for _, tcase := range validSQL {
@@ -2066,12 +2078,12 @@ func TestCreateTable(t *testing.T) {
 	}
 
 	sql := "create table t garbage"
-	tree, err := Parse(sql)
+	_, err := Parse(sql)
 	if err != nil {
 		t.Errorf("input: %s, err: %v", sql, err)
 	}
 
-	tree, err = ParseStrictDDL(sql)
+	tree, err := ParseStrictDDL(sql)
 	if tree != nil || err == nil {
 		t.Errorf("ParseStrictDDL unexpectedly accepted input %s", sql)
 	}

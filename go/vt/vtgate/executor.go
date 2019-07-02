@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"golang.org/x/net/context"
+	"vitess.io/vitess/go/trace"
 
 	"vitess.io/vitess/go/acl"
 	"vitess.io/vitess/go/cache"
@@ -75,13 +76,12 @@ type Executor struct {
 	scatterConn *ScatterConn
 	txConn      *TxConn
 
-	mu               sync.Mutex
-	vschema          *vindexes.VSchema
-	normalize        bool
-	streamSize       int
-	legacyAutocommit bool
-	plans            *cache.LRUCache
-	vschemaStats     *VSchemaStats
+	mu           sync.Mutex
+	vschema      *vindexes.VSchema
+	normalize    bool
+	streamSize   int
+	plans        *cache.LRUCache
+	vschemaStats *VSchemaStats
 
 	vm VSchemaManager
 }
@@ -89,17 +89,16 @@ type Executor struct {
 var executorOnce sync.Once
 
 // NewExecutor creates a new Executor.
-func NewExecutor(ctx context.Context, serv srvtopo.Server, cell, statsName string, resolver *Resolver, normalize bool, streamSize int, queryPlanCacheSize int64, legacyAutocommit bool) *Executor {
+func NewExecutor(ctx context.Context, serv srvtopo.Server, cell, statsName string, resolver *Resolver, normalize bool, streamSize int, queryPlanCacheSize int64) *Executor {
 	e := &Executor{
-		serv:             serv,
-		cell:             cell,
-		resolver:         resolver,
-		scatterConn:      resolver.scatterConn,
-		txConn:           resolver.scatterConn.txConn,
-		plans:            cache.NewLRUCache(queryPlanCacheSize),
-		normalize:        normalize,
-		streamSize:       streamSize,
-		legacyAutocommit: legacyAutocommit,
+		serv:        serv,
+		cell:        cell,
+		resolver:    resolver,
+		scatterConn: resolver.scatterConn,
+		txConn:      resolver.scatterConn.txConn,
+		plans:       cache.NewLRUCache(queryPlanCacheSize),
+		normalize:   normalize,
+		streamSize:  streamSize,
 	}
 
 	vschemaacl.Init()
@@ -122,6 +121,11 @@ func NewExecutor(ctx context.Context, serv srvtopo.Server, cell, statsName strin
 
 // Execute executes a non-streaming query.
 func (e *Executor) Execute(ctx context.Context, method string, safeSession *SafeSession, sql string, bindVars map[string]*querypb.BindVariable) (result *sqltypes.Result, err error) {
+	span, ctx := trace.NewSpan(ctx, "executor.Execute")
+	span.Annotate("method", method)
+	trace.AnnotateSQL(span, sql)
+	defer span.Finish()
+
 	logStats := NewLogStats(ctx, method, sql, bindVars)
 	result, err = e.execute(ctx, safeSession, sql, bindVars, logStats)
 	logStats.Error = err
@@ -137,8 +141,7 @@ func (e *Executor) Execute(ctx context.Context, method string, safeSession *Safe
 
 func (e *Executor) execute(ctx context.Context, safeSession *SafeSession, sql string, bindVars map[string]*querypb.BindVariable, logStats *LogStats) (*sqltypes.Result, error) {
 	// Start an implicit transaction if necessary.
-	// TODO(sougou): deprecate legacyMode after all users are migrated out.
-	if !e.legacyAutocommit && !safeSession.Autocommit && !safeSession.InTransaction() {
+	if !safeSession.Autocommit && !safeSession.InTransaction() {
 		if err := e.txConn.Begin(ctx, safeSession); err != nil {
 			return nil, err
 		}
@@ -176,11 +179,6 @@ func (e *Executor) execute(ctx context.Context, safeSession *SafeSession, sql st
 	case sqlparser.StmtInsert, sqlparser.StmtReplace, sqlparser.StmtUpdate, sqlparser.StmtDelete:
 		safeSession := safeSession
 
-		// In legacy mode, we ignore autocommit settings.
-		if e.legacyAutocommit {
-			return e.handleExec(ctx, safeSession, sql, bindVars, destKeyspace, destTabletType, dest, logStats)
-		}
-
 		mustCommit := false
 		if safeSession.Autocommit && !safeSession.InTransaction() {
 			mustCommit = true
@@ -200,7 +198,7 @@ func (e *Executor) execute(ctx context.Context, safeSession *SafeSession, sql st
 		// do is likely not final.
 		// The control flow is such that autocommitable can only be turned on
 		// at the beginning, but never after.
-		safeSession.SetAutocommitable(mustCommit)
+		safeSession.SetAutocommittable(mustCommit)
 
 		qr, err := e.handleExec(ctx, safeSession, sql, bindVars, destKeyspace, destTabletType, dest, logStats)
 		if err != nil {
@@ -274,7 +272,7 @@ func (e *Executor) handleExec(ctx context.Context, safeSession *SafeSession, sql
 		logStats.SQL = sql
 		logStats.BindVariables = bindVars
 		result, err := e.destinationExec(ctx, safeSession, sql, bindVars, dest, destKeyspace, destTabletType, logStats)
-		logStats.ExecuteTime = time.Now().Sub(execStart)
+		logStats.ExecuteTime = time.Since(execStart)
 		queriesRouted.Add("ShardDirect", int64(logStats.ShardQueries))
 		return result, err
 	}
@@ -394,7 +392,7 @@ func (e *Executor) handleVSchemaDDL(ctx context.Context, safeSession *SafeSessio
 		return errNoKeyspace
 	}
 
-	ks, _ := vschema.Keyspaces[ksName]
+	ks := vschema.Keyspaces[ksName]
 	ks, err := topotools.ApplyVSchemaDDL(ksName, ks, ddl)
 
 	if err != nil {
@@ -747,6 +745,25 @@ func (e *Executor) handleShow(ctx context.Context, safeSession *SafeSession, sql
 			Rows:         rows,
 			RowsAffected: 2,
 		}, nil
+	case "create table":
+		if destKeyspace == "" && show.HasTable() {
+			// For "show create table", if there isn't a targeted keyspace already
+			// we can either get a keyspace from the statement or potentially from
+			// the vschema.
+
+			if !show.Table.Qualifier.IsEmpty() {
+				// Explicit keyspace was passed. Use that for targeting but remove from the query itself.
+				destKeyspace = show.Table.Qualifier.String()
+				show.Table.Qualifier = sqlparser.NewTableIdent("")
+				sql = sqlparser.String(show)
+			} else {
+				// No keyspace was indicated. Try to find one using the vschema.
+				tbl, err := e.VSchema().FindTable("", show.Table.Name.String())
+				if err == nil {
+					destKeyspace = tbl.Keyspace.Name
+				}
+			}
+		}
 	case sqlparser.KeywordString(sqlparser.TABLES):
 		if show.ShowTablesOpt != nil && show.ShowTablesOpt.DbName != "" {
 			if destKeyspace == "" {
@@ -756,7 +773,7 @@ func (e *Executor) handleShow(ctx context.Context, safeSession *SafeSession, sql
 			show.ShowTablesOpt.DbName = ""
 		}
 		sql = sqlparser.String(show)
-	case sqlparser.KeywordString(sqlparser.DATABASES), sqlparser.KeywordString(sqlparser.VITESS_KEYSPACES):
+	case sqlparser.KeywordString(sqlparser.DATABASES), sqlparser.KeywordString(sqlparser.SCHEMAS), sqlparser.KeywordString(sqlparser.VITESS_KEYSPACES):
 		keyspaces, err := e.resolver.resolver.GetAllKeyspaces(ctx)
 		if err != nil {
 			return nil, err
@@ -917,7 +934,7 @@ func (e *Executor) handleShow(ctx context.Context, safeSession *SafeSession, sql
 		}
 		sort.Strings(ksNames)
 		for _, ksName := range ksNames {
-			ks, _ := vschema.Keyspaces[ksName]
+			ks := vschema.Keyspaces[ksName]
 
 			vindexNames := make([]string, 0, len(ks.Vindexes))
 			for name := range ks.Vindexes {
@@ -925,7 +942,7 @@ func (e *Executor) handleShow(ctx context.Context, safeSession *SafeSession, sql
 			}
 			sort.Strings(vindexNames)
 			for _, vindexName := range vindexNames {
-				vindex, _ := ks.Vindexes[vindexName]
+				vindex := ks.Vindexes[vindexName]
 
 				params := make([]string, 0, 4)
 				for k, v := range vindex.GetParams() {
@@ -946,7 +963,7 @@ func (e *Executor) handleShow(ctx context.Context, safeSession *SafeSession, sql
 			{Name: "Type", Type: sqltypes.Uint16},
 			{Name: "Message", Type: sqltypes.VarChar},
 		}
-		rows := make([][]sqltypes.Value, 0, 0)
+		rows := make([][]sqltypes.Value, 0)
 
 		if safeSession.Warnings != nil {
 			for _, warning := range safeSession.Warnings {
@@ -1026,7 +1043,7 @@ func (e *Executor) handleOther(ctx context.Context, safeSession *SafeSession, sq
 }
 
 func (e *Executor) handleComment(sql string) (*sqltypes.Result, error) {
-	_, sql = sqlparser.ExtractMysqlComment(sql)
+	_, _ = sqlparser.ExtractMysqlComment(sql)
 	// Not sure if this is a good idea.
 	return &sqltypes.Result{}, nil
 }
@@ -1267,11 +1284,8 @@ func (e *Executor) getPlan(vcursor *vcursorImpl, sql string, comments sqlparser.
 		return nil, errors.New("vschema not initialized")
 	}
 	keyspace := vcursor.keyspace
-	key := sql
-	if keyspace != "" {
-		key = keyspace + ":" + sql
-	}
-	if result, ok := e.plans.Get(key); ok {
+	planKey := keyspace + vindexes.TabletTypeSuffix[vcursor.tabletType] + ":" + sql
+	if result, ok := e.plans.Get(planKey); ok {
 		return result.(*engine.Plan), nil
 	}
 	stmt, err := sqlparser.Parse(sql)
@@ -1284,7 +1298,7 @@ func (e *Executor) getPlan(vcursor *vcursorImpl, sql string, comments sqlparser.
 			return nil, err
 		}
 		if !skipQueryPlanCache && !sqlparser.SkipQueryPlanCacheDirective(stmt) {
-			e.plans.Set(key, plan)
+			e.plans.Set(planKey, plan)
 		}
 		return plan, nil
 	}
@@ -1298,11 +1312,8 @@ func (e *Executor) getPlan(vcursor *vcursorImpl, sql string, comments sqlparser.
 		logStats.BindVariables = bindVars
 	}
 
-	normkey := normalized
-	if keyspace != "" {
-		normkey = keyspace + ":" + normalized
-	}
-	if result, ok := e.plans.Get(normkey); ok {
+	planKey = keyspace + vindexes.TabletTypeSuffix[vcursor.tabletType] + ":" + normalized
+	if result, ok := e.plans.Get(planKey); ok {
 		return result.(*engine.Plan), nil
 	}
 	plan, err := planbuilder.BuildFromStmt(normalized, stmt, vcursor)
@@ -1310,7 +1321,7 @@ func (e *Executor) getPlan(vcursor *vcursorImpl, sql string, comments sqlparser.
 		return nil, err
 	}
 	if !skipQueryPlanCache && !sqlparser.SkipQueryPlanCacheDirective(stmt) {
-		e.plans.Set(normkey, plan)
+		e.plans.Set(planKey, plan)
 	}
 	return plan, nil
 }
@@ -1346,7 +1357,7 @@ func (e *Executor) ServeHTTP(response http.ResponseWriter, request *http.Request
 		}
 	} else if request.URL.Path == "/debug/vschema" {
 		response.Header().Set("Content-Type", "application/json; charset=utf-8")
-		b, err := json.MarshalIndent(e.VSchema().Keyspaces, "", " ")
+		b, err := json.MarshalIndent(e.VSchema(), "", " ")
 		if err != nil {
 			response.Write([]byte(err.Error()))
 			return
